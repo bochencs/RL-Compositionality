@@ -11,6 +11,7 @@ RESPONSE_LENGTH=${RESPONSE_LENGTH:-"8192"}
 NNODES=${NNODES:-"1"}
 N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-"4"}
 PYTHON_BIN=${PYTHON_BIN:-"python3"}
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-"0.8"}
 
 ${PYTHON_BIN} -m verl.trainer.main_generation \
     trainer.nnodes=${NNODES} \
@@ -30,5 +31,5 @@ ${PYTHON_BIN} -m verl.trainer.main_generation \
     rollout.prompt_length=$PROMPT_LENGTH \
     rollout.response_length=$RESPONSE_LENGTH \
     rollout.tensor_model_parallel_size=1 \
-    rollout.gpu_memory_utilization=0.8 \
+    rollout.gpu_memory_utilization=${GPU_MEM_UTIL} \
     "$@"

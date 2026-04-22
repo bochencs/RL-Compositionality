@@ -246,10 +246,24 @@ class FSDPSFTTrainer(object):
         init_context = get_init_weight_context_manager(use_meta_tensor=not config.tie_word_embeddings,
                                                        mesh=self.device_mesh)
 
+        # Model dtype: fp32 is the safe default (matches FSDP reduce_dtype),
+        # but memory-constrained single-GPU setups need bf16 to fit. Respect
+        # an explicit hydra override (model.dtype) or env fallback (VERL_SFT_MODEL_DTYPE).
+        # Guard .get() against OmegaConf struct mode where the key is absent.
+        try:
+            _sft_dtype_cfg = self.config.model.get('dtype', None)
+        except Exception:
+            _sft_dtype_cfg = None
+        _sft_dtype_str = str(_sft_dtype_cfg
+                             or os.environ.get('VERL_SFT_MODEL_DTYPE', 'fp32'))
+        _sft_dtype_map = {'fp32': torch.float32, 'float32': torch.float32,
+                          'bf16': torch.bfloat16, 'bfloat16': torch.bfloat16,
+                          'fp16': torch.float16, 'float16': torch.float16}
+        _sft_dtype = _sft_dtype_map.get(_sft_dtype_str.lower(), torch.float32)
         with init_context():
             self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(local_model_path,
                                                                                config=config,
-                                                                               torch_dtype=torch.float32,
+                                                                               torch_dtype=_sft_dtype,
                                                                                attn_implementation=get_attn_implementation(
                                                                                    'flash_attention_2'),
                                                                                trust_remote_code=trust_remote_code)

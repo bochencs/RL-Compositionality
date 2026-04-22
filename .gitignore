@@ -1,6 +1,7 @@
 
 **/*.pt
 **/checkpoints
+**/checkpoints_fresh
 **/wget-log
 **/_build/
 **/*.ckpt
@@ -8,6 +9,12 @@
 **/*.tar.gz
 **/playground
 **/wandb
+
+# tooling / tmp / snapshot artifacts
+.claude/
+.tmp/
+RL-Compositionality-clean/
+make_tensor_with_pad
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -21,7 +28,8 @@ tensorflow/my_graph/*
 
 # Distribution / packaging
 .Python
-env/
+# Match only the root-level python "env/" virtualenv; leave scripts/env/ alone.
+/env/
 build/
 develop-eggs/
 dist/
