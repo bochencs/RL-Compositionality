@@ -61,6 +61,16 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         self.tp_size = vllm_ps.get_tensor_model_parallel_world_size()
         self.tp_rank = vllm_ps.get_tensor_model_parallel_rank()
 
+        sleep_level_env = os.getenv('VERL_VLLM_SLEEP_LEVEL', '1')
+        try:
+            self.vllm_sleep_level = int(sleep_level_env)
+        except ValueError:
+            self.vllm_sleep_level = 1
+            logger.warning('Invalid VERL_VLLM_SLEEP_LEVEL=%s, fallback to 1', sleep_level_env)
+        if self.vllm_sleep_level not in (0, 1, 2):
+            logger.warning('Unsupported VERL_VLLM_SLEEP_LEVEL=%s, fallback to 1', self.vllm_sleep_level)
+            self.vllm_sleep_level = 1
+
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = torch.cuda.get_rng_state()
         # get a random rng states
@@ -91,7 +101,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
             self.inference_engine.sync_model_weights(params, load_format=load_format)
         else:
-            self.inference_engine.wake_up()
+            if self.vllm_sleep_level > 0:
+                self.inference_engine.wake_up()
             world_size = torch.distributed.get_world_size()
             model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
             loaded_params = model.load_weights(
@@ -120,7 +131,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
             self.inference_engine.offload_model_weights()
         else:
-            self.inference_engine.sleep(level=1)
+            if self.vllm_sleep_level > 0:
+                self.inference_engine.sleep(level=self.vllm_sleep_level)
         log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
 
         # self.module.to('cuda')

@@ -25,6 +25,7 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 
 import logging
 import re
+import warnings
 from contextlib import nullcontext
 import torch
 import torch.distributed
@@ -35,7 +36,18 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedModel, A
 from verl.utils.torch_functional import get_cosine_schedule_with_warmup
 from tensordict import TensorDict
 from torch.utils.data import DataLoader, DistributedSampler
-from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+    FLASH_ATTN_BERT_PADDING_AVAILABLE = True
+    FLASH_ATTN_BERT_PADDING_IMPORT_ERROR = None
+except Exception as flash_attn_import_error:  # pragma: no cover
+    pad_input = None
+    unpad_input = None
+    rearrange = None
+    index_first_axis = None
+    FLASH_ATTN_BERT_PADDING_AVAILABLE = False
+    FLASH_ATTN_BERT_PADDING_IMPORT_ERROR = flash_attn_import_error
 
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy, init_fn, get_init_weight_context_manager
 from verl.utils.dataset import SFTDataset
@@ -54,6 +66,24 @@ from verl import DataProto
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_SFT_LOGGING_LEVEL', 'WARN'))
+
+
+def get_attn_implementation(preferred: str = 'flash_attention_2') -> str:
+    override = os.getenv('VERL_ATTN_IMPLEMENTATION', None)
+    if override:
+        return override
+
+    if preferred != 'flash_attention_2':
+        return preferred
+
+    try:
+        import flash_attn  # noqa: F401
+        return preferred
+    except Exception as import_error:
+        warnings.warn(
+            f'flash-attn is not available ({import_error!r}); fallback to eager attention. '
+            f'Set VERL_ATTN_IMPLEMENTATION to override.')
+        return 'eager'
 
 
 def extract_step(path):
@@ -84,6 +114,10 @@ class FSDPSFTTrainer(object):
         self.sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         # build tokenizer first
         local_model_path = copy_to_local(src=self.config.model.partial_pretrain, verbose=True)
+        if self.config.model.get('external_lib', None) is not None:
+            # Import external tokenizer/model registration hooks before tokenizer loading.
+            import importlib
+            importlib.import_module(self.config.model.external_lib)
         from verl.utils import hf_tokenizer
         self.tokenizer = hf_tokenizer(local_model_path, trust_remote_code=self.config.model.trust_remote_code)
         if self.config.data.chat_template is not None:
@@ -95,6 +129,11 @@ class FSDPSFTTrainer(object):
         # Set sequence parallel size
         self.config.ulysses_sequence_parallel_size = getattr(self.config, 'ulysses_sequence_parallel_size', 1)
         self.use_remove_padding = getattr(self.config, 'use_remove_padding', False)
+        if self.use_remove_padding and self.config.ulysses_sequence_parallel_size > 1 and \
+                not FLASH_ATTN_BERT_PADDING_AVAILABLE:
+            raise ImportError(
+                'use_remove_padding=True with ulysses_sequence_parallel_size>1 requires flash_attn. '
+                f'Original import error: {FLASH_ATTN_BERT_PADDING_IMPORT_ERROR!r}')
         if self.device_mesh.get_rank() == 0:
             print(f'Using sequence parallel size: {self.config.ulysses_sequence_parallel_size}')
             print(f'Using remove padding: {self.use_remove_padding}')
@@ -211,7 +250,8 @@ class FSDPSFTTrainer(object):
             self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(local_model_path,
                                                                                config=config,
                                                                                torch_dtype=torch.float32,
-                                                                               attn_implementation='flash_attention_2',
+                                                                               attn_implementation=get_attn_implementation(
+                                                                                   'flash_attention_2'),
                                                                                trust_remote_code=trust_remote_code)
 
             # Apply Liger kernel if use_liger is enabled

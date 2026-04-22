@@ -21,6 +21,7 @@ import numpy as np
 import hydra
 import os
 import json
+from datetime import datetime
 from tabulate import tabulate
 from datasets import load_dataset
 
@@ -59,9 +60,51 @@ def run_generation(config) -> None:
 def main_task(config):
     from pprint import pprint
     from omegaconf import OmegaConf
+    from verl.utils.import_utils import import_external_libs
 
-    pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
+    resolved_config = OmegaConf.to_container(config, resolve=True)
+    pprint(resolved_config)  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
+
+    wandb_run = None
+    wandb_module = None
+    if os.environ.get("WANDB_ENABLE", "0") == "1":
+        try:
+            import wandb as wandb_module  # type: ignore
+
+            project = os.environ.get("WANDB_PROJECT", "rlcomp-inference")
+            run_name = os.environ.get("WANDB_RUN_NAME", os.path.basename(str(config.data.output_path)))
+            init_kwargs = {
+                "project": project,
+                "name": run_name,
+                "config": resolved_config,
+                "reinit": True,
+            }
+            entity = os.environ.get("WANDB_ENTITY")
+            group = os.environ.get("WANDB_GROUP")
+            tags = [tag.strip() for tag in os.environ.get("WANDB_TAGS", "").split(",") if tag.strip()]
+            notes = os.environ.get("WANDB_NOTES")
+            if entity:
+                init_kwargs["entity"] = entity
+            if group:
+                init_kwargs["group"] = group
+            if len(tags) > 0:
+                init_kwargs["tags"] = tags
+            if notes:
+                init_kwargs["notes"] = notes
+
+            wandb_run = wandb_module.init(**init_kwargs)
+            wandb_run.log({
+                "meta/run_start_time": datetime.utcnow().isoformat(),
+                "meta/model_path": config.model.path,
+                "meta/data_path": config.data.path,
+                "meta/n_samples": int(config.data.n_samples),
+                "meta/temperature": float(config.rollout.temperature),
+            })
+        except Exception as e:
+            print(f"[WANDB] init failed, continue without wandb: {e}")
+            wandb_run = None
+            wandb_module = None
 
     if os.path.exists(config.data.output_path) and not config.data.overwrite:
         print(f"Output file {config.data.output_path} already exists. Skipping generation and proceeding to evaluation.")
@@ -69,6 +112,7 @@ def main_task(config):
         dataset = load_dataset("parquet", data_files=config.data.output_path)['train']
     else:
         local_path = copy_to_local(config.model.path)
+        import_external_libs(config.model.get("external_lib", None))
         from verl.utils import hf_tokenizer
 
         tokenizer = hf_tokenizer(local_path)
@@ -167,6 +211,18 @@ def main_task(config):
                     json.dump(output_text_unpad, f)
 
                 output_lst[i].extend(output_text_unpad)
+                if wandb_run is not None:
+                    try:
+                        wandb_run.log(
+                            {
+                                "progress/generation_sample_index": int(i + 1),
+                                "progress/generation_sample_total": int(config.data.n_samples),
+                                "progress/generation_sample_ratio": float(i + 1) / float(config.data.n_samples),
+                            },
+                            step=int(i + 1),
+                        )
+                    except Exception as e:
+                        print(f"[WANDB] progress log failed: {e}")
 
         # convert output_lst from (n_samples, n_data) to (n_data, n_sampels)
         output_lst = np.array(output_lst, dtype=object)
@@ -185,10 +241,22 @@ def main_task(config):
 
     output_dir = os.path.dirname(config.data.output_path)
     # Compute evaluation metrics
-    prompts = dataset[config.data.prompt_key]
     responses = dataset['responses']  # Using the generated responses
     data_sources = dataset[config.data.data_source_key]
     reward_model_data = dataset[config.data.reward_model_key]
+
+    def _normalize_score(score):
+        # Some reward fns return tuple/list, e.g., (reward, acc).
+        # Prefer the explicit accuracy slot when available.
+        if isinstance(score, (tuple, list)):
+            if len(score) >= 2 and isinstance(score[1], (int, float, bool)):
+                return float(score[1])
+            if len(score) >= 1 and isinstance(score[0], (int, float, bool)):
+                return float(score[0])
+            return 0.0
+        if isinstance(score, (int, float, bool)):
+            return float(score)
+        return 0.0
 
     passes = 0
     total = len(dataset)
@@ -196,22 +264,28 @@ def main_task(config):
     
     for i in range(total):
         response_lst = responses[i]
+        if isinstance(response_lst, np.ndarray):
+            response_lst = response_lst.tolist()
+        elif isinstance(response_lst, tuple):
+            response_lst = list(response_lst)
+        elif not isinstance(response_lst, list):
+            # Keep non-list case (including n_samples=1) consistent with n_samples>1.
+            response_lst = [response_lst]
         data_source = data_sources[i]
-        prompt = prompts[i]
         reward_data = reward_model_data[i]
         ground_truth = reward_data['ground_truth']
         score_lst = []
         for r in response_lst:
-            score = _default_compute_score(data_source, r, ground_truth)
+            score = _normalize_score(_default_compute_score(data_source, r, ground_truth))
             score_lst.append(score)
-        max_score = np.max(score_lst)
+        max_score = np.max(score_lst) if len(score_lst) > 0 else 0.0
         total_scores.append(score_lst)
-        if max_score == 1:
+        if max_score >= 1.0:
             passes += 1
 
     n_samples = config.data.n_samples
     pass_at_n = passes / total
-    pass_at_1 = np.mean(total_scores)
+    pass_at_1 = np.mean([scores[0] if len(scores) > 0 else 0.0 for scores in total_scores])
 
     # Save metrics to CSV
     csv_path = os.path.join(output_dir, 'pass.csv')
@@ -241,6 +315,30 @@ def main_task(config):
     
     # Print table
     print(tabulate(table_data, headers=['Metric', 'Value'], tablefmt='grid'))
+
+    if wandb_run is not None and wandb_module is not None:
+        try:
+            wandb_run.log({
+                "metrics/pass_at_1": float(pass_at_1),
+                f"metrics/pass_at_{n_samples}": float(pass_at_n),
+                "metrics/num_prompts": int(total),
+                "meta/output_path": config.data.output_path,
+                "meta/dataset_name": dataset_name,
+            })
+            if os.path.exists(config.data.output_path):
+                artifact_name = f"gen_{os.path.basename(config.data.output_path).replace('.', '_')}_{n_samples}"
+                artifact = wandb_module.Artifact(artifact_name, type="inference-results")
+                artifact.add_file(config.data.output_path)
+                if os.path.exists(csv_path):
+                    artifact.add_file(csv_path)
+                wandb_run.log_artifact(artifact)
+        except Exception as e:
+            print(f"[WANDB] finalize log failed: {e}")
+        finally:
+            try:
+                wandb_run.finish()
+            except Exception:
+                pass
 
 # Add the select_reward_fn from main_eval.py
 # def select_reward_fn(data_source):

@@ -1,4 +1,7 @@
-export NNODES=1
+set -euo pipefail
+
+export NNODES=${NNODES:-8}
+export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 export DATA_PATH=data/string_task/stage1_level1/train.parquet
 export N_SAMPLES=10
 export SAVE_PATH=data/string_task/stage1_level1/rollout.parquet
@@ -9,6 +12,18 @@ export RESPONSE_LENGTH=8192
 export RFT_DATA_SAVE_PATH=data/string_task/stage1_level1/rft_data
 export ROLLOUT_DATA_PATH=${ROLLOUT_DATA_PATH:-data/string_task/stage1_level1/train_rollout_prompted.parquet}
 export ROLLOUT_PROMPT_HINT=${ROLLOUT_PROMPT_HINT:-First consider the logic of the Python code, then predict the output.}
+
+if [ "${NNODES}" -gt 1 ]; then
+    export RAY_ADDRESS=${RAY_ADDRESS:-auto}
+    echo "[stage1_create_train_data_multi] NNODES=${NNODES}, expecting an existing Ray cluster. RAY_ADDRESS=${RAY_ADDRESS}"
+    if ! ray status >/dev/null 2>&1; then
+        echo "[stage1_create_train_data_multi] ERROR: Ray cluster is not reachable."
+        echo "[stage1_create_train_data_multi] Start Ray first, e.g.:"
+        echo "  head node:   ray start --head --port 6379 --num-gpus ${N_GPUS_PER_NODE}"
+        echo "  worker node: ray start --address <HEAD_IP>:6379 --num-gpus ${N_GPUS_PER_NODE}"
+        exit 1
+    fi
+fi
 
 python3 - <<'PY'
 import copy
@@ -39,12 +54,12 @@ dataset.to_parquet(dst)
 print(f"[stage1_create_train_data] rollout prompt dataset written to: {dst}")
 PY
 
-DATA_PATH=${ROLLOUT_DATA_PATH} NNODES=1 N_GPUS_PER_NODE=4 bash examples/generation/run_string.sh
+DATA_PATH=${ROLLOUT_DATA_PATH} NNODES=${NNODES} N_GPUS_PER_NODE=${N_GPUS_PER_NODE} bash examples/generation/run_string.sh
 
 python3 examples/data_preprocess/string_manipulation_sft.py \
     --gen_path ${SAVE_PATH} \
     --data_path ${DATA_PATH} \
     --save_path ${RFT_DATA_SAVE_PATH} \
-    --val_size 1 \
+    --val_size 256 \
     --max_correct_ratio 1.0 \
-    --no_remove_context
+    # --no_remove_context

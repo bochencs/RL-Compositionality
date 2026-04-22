@@ -56,6 +56,12 @@ class HFRollout(BaseRollout):
         # used to construct attention_mask
         eos_token_id = prompts.meta_info['eos_token_id']
         pad_token_id = prompts.meta_info['pad_token_id']
+        # Some tokenizer configs do not define pad_token_id; fallback to eos to keep generation and padding valid.
+        if pad_token_id is None:
+            if isinstance(eos_token_id, (list, tuple)):
+                pad_token_id = eos_token_id[0]
+            else:
+                pad_token_id = eos_token_id
 
         batch_size = idx.size(0)
         prompt_length = idx.size(1)

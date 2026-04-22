@@ -1,9 +1,14 @@
 from argparse import ArgumentParser
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 
 def main(args):
-    dataset = load_dataset('parquet', data_files=args.data)['train']
-    dataset.to_parquet(args.output_path)
+    rows = []
+    for path in args.data:
+        dataset = load_dataset('parquet', data_files=path)['train']
+        rows.extend(dataset.to_list())
+
+    merged = Dataset.from_list(rows)
+    merged.to_parquet(args.output_path)
 
 
 if __name__ == '__main__':

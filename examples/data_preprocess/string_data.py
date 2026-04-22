@@ -233,7 +233,6 @@ def backchain_palindrome(s, depth):
     new_s = s + s[::-1]
     return backchain_palindrome(new_s, depth - 1)
 
-
 # --------------------------------------------------
 # Custom Functions Dictionary for eval
 # --------------------------------------------------
@@ -349,7 +348,8 @@ def random_expr(depth=3):
             no_param_custom = [
                 "deterministic_shuffle", "remove_vowels", "sort_chars", "reverse_words", "mirror_str", "alternate_case",
                 "vowel_to_number", "duplicate_every_char", "fancy_brackets", "compress_repeats", "recursive_reverse",
-                "loop_filter_nonalpha", "verify_even_length"
+                "loop_filter_nonalpha", "verify_even_length", "run_length_encode", "sort_by_frequency",
+                "checksum_rotate"
             ]
             param_custom = [
                 "repeat_str", "add_prefix", "add_suffix", "rotate_str", "shift_chars", "insert_separator",
