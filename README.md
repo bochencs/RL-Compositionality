@@ -29,8 +29,50 @@ bash /home/ma-user/work/RL-Compositionality/rlcomp.sh <action>
 **覆盖默认值**：直接 `export VAR=value` 再调 `rlcomp.sh`，例如：
 
 ```bash
-export WANDB_MODE=online WANDB_API_KEY=... GPU_MEM_UTIL=0.5
+export GPU_MEM_UTIL=0.5
 bash rlcomp.sh stage1
+```
+
+## 配置 wandb 和其他 secret
+
+在仓库根建 `.env.local`（已加 gitignore，不会被提交），bootstrap 自动载入：
+
+```bash
+# .env.local
+WANDB_API_KEY=wandb_v1_...
+# 可选：HUGGING_FACE_HUB_TOKEN=...
+```
+
+有 `WANDB_API_KEY` 时 bootstrap 默认 `WANDB_MODE=online`；无则默认 offline。
+
+## 日志与调试
+
+每次 `bash rlcomp.sh <action>` 都会在 `results/pipeline_runs/` 下生成一份完整记录（gitignored，每机本地）：
+
+```
+results/pipeline_runs/
+├── history.jsonl            # 一行一条，适合 jq/grep
+├── labbook.md               # 人读表格
+├── latest -> YYYYMMDD_..../ # 最近一次运行
+└── YYYYMMDD_HHMMSS_<action>/
+    ├── invocation.meta.json # 总体 meta (host, git, GPU, env, 耗时, exit code)
+    ├── invocation.context.txt
+    ├── <step>.stdout.log    # 每步的完整 stdout
+    ├── <step>.stderr.log
+    └── <step>.meta.json     # 每步的 exit code + 耗时
+```
+
+常用命令：
+
+```bash
+# 最近一次出错在哪一步
+cat results/pipeline_runs/latest/invocation.meta.json | jq '.sub_actions[] | select(.exit_code != 0)'
+
+# 看最近一次 stage1 的完整 stderr
+tail -100 results/pipeline_runs/latest/stage1.stderr.log
+
+# 所有失败过的运行
+jq 'select(.exit_code != 0)' results/pipeline_runs/history.jsonl
 ```
 
 ## Citing

@@ -49,6 +49,18 @@ cd "${RLCOMP_REPO_ROOT}"
 # ---------- 2. drop proxies (per README) ----------
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 
+# ---------- 2b. local secrets / per-machine overrides ----------
+# .env.local is gitignored and intended for credentials (WANDB_API_KEY,
+# HUGGING_FACE_HUB_TOKEN, etc.) and per-machine knob overrides. If present,
+# source it so every downstream process inherits the values. KEY=VALUE lines
+# are auto-exported via `set -a`.
+if [ -f "${RLCOMP_REPO_ROOT}/.env.local" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "${RLCOMP_REPO_ROOT}/.env.local"
+    set +a
+fi
+
 # ---------- 3. activate venv ----------
 _RLCOMP_VENV="${RLCOMP_REPO_ROOT}/.venv-rlcomp"
 if [ ! -f "${_RLCOMP_VENV}/bin/activate" ]; then
@@ -290,9 +302,18 @@ case "${PYTORCH_CUDA_ALLOC_CONF:-}" in
 esac
 
 # ---------- 9. wandb ----------
-# Default to offline so a brand-new shell never hangs/fails on missing API key.
-# To log online:   export WANDB_MODE=online && export WANDB_API_KEY=...
-export WANDB_MODE="${WANDB_MODE:-offline}"
+# Default mode:
+#   - online  if WANDB_API_KEY is set (typically via .env.local)
+#   - offline otherwise (never hang/fail on missing key)
+# Caller can force either mode explicitly via WANDB_MODE=...
+if [ -z "${WANDB_MODE:-}" ]; then
+    if [ -n "${WANDB_API_KEY:-}" ]; then
+        WANDB_MODE="online"
+    else
+        WANDB_MODE="offline"
+    fi
+fi
+export WANDB_MODE
 export WANDB_DIR="${WANDB_DIR:-${RLCOMP_REPO_ROOT}/wandb}"
 export WANDB_PROJECT="${WANDB_PROJECT:-rlcompose-new-abilities}"
 mkdir -p "${WANDB_DIR}"

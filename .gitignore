@@ -96,8 +96,9 @@ target/
 # celery beat schedule file
 celerybeat-schedule
 
-# dotenv
+# dotenv — all variants (.env, .env.local, .env.production, etc.)
 .env
+.env.*
 
 # virtualenv
 venv/
