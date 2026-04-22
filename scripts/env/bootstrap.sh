@@ -63,6 +63,25 @@ if [ -n "${VIRTUAL_ENV:-}" ] && [ -n "$(type -t deactivate 2>/dev/null)" ]; then
 fi
 # shellcheck disable=SC1090,SC1091
 . "${_RLCOMP_VENV}/bin/activate"
+
+# Python venvs bake their absolute creation path into bin/activate. On a
+# shared filesystem accessed via a different mount prefix (e.g. the venv was
+# created at /home/ma-user/work/RL-Compositionality/.venv-rlcomp but this
+# machine sees the same files at /inspire/.../dllm/RL-Compositionality/.venv-rlcomp),
+# activate sets VIRTUAL_ENV to the stale path and every python/torchrun call
+# hits "No such file or directory". Force VIRTUAL_ENV and PATH to the path we
+# resolved from this file's own location.
+if [ "${VIRTUAL_ENV}" != "${_RLCOMP_VENV}" ]; then
+    _RLCOMP_STALE_BIN="${VIRTUAL_ENV}/bin"
+    export VIRTUAL_ENV="${_RLCOMP_VENV}"
+    # Strip the stale venv bin (if present) from PATH, prepend the real one.
+    _RLCOMP_NEW_PATH=":${PATH}:"
+    _RLCOMP_NEW_PATH="${_RLCOMP_NEW_PATH//:${_RLCOMP_STALE_BIN}:/:}"
+    _RLCOMP_NEW_PATH="${_RLCOMP_NEW_PATH#:}"
+    _RLCOMP_NEW_PATH="${_RLCOMP_NEW_PATH%:}"
+    export PATH="${VIRTUAL_ENV}/bin:${_RLCOMP_NEW_PATH}"
+    unset _RLCOMP_STALE_BIN _RLCOMP_NEW_PATH
+fi
 unset _RLCOMP_VENV
 export RLCOMP_PYTHON="${VIRTUAL_ENV}/bin/python"
 
@@ -75,7 +94,11 @@ case ":${PYTHONPATH:-}:" in
 esac
 
 # ---------- 5. model / HF cache ----------
-export MODEL_STORE_ROOT="${MODEL_STORE_ROOT:-/home/ma-user/work/model_store}"
+# Derive from repo parent rather than hardcoding /home/ma-user/work/, so the
+# same script works on any mount point (shared FS, different container path).
+# The canonical layout is: $RLCOMP_WORK_ROOT/{RL-Compositionality, model_store}.
+export RLCOMP_WORK_ROOT="${RLCOMP_WORK_ROOT:-$(dirname "${RLCOMP_REPO_ROOT}")}"
+export MODEL_STORE_ROOT="${MODEL_STORE_ROOT:-${RLCOMP_WORK_ROOT}/model_store}"
 export HF_MODEL_ROOT="${HF_MODEL_ROOT:-${MODEL_STORE_ROOT}/hf_models}"
 export HF_CACHE_ROOT="${HF_CACHE_ROOT:-${MODEL_STORE_ROOT}/hf_cache}"
 export HF_HOME="${HF_HOME:-${HF_CACHE_ROOT}}"
@@ -87,10 +110,23 @@ export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_CACHE_ROOT}/transformers}"
 export TMPDIR="${TMPDIR:-${RLCOMP_REPO_ROOT}/.tmp}"
 export TMP="${TMP:-${TMPDIR}}"
 export TEMP="${TEMP:-${TMPDIR}}"
-# Ray sockets need a SHORT path (<107 bytes for AF_UNIX). /home/ma-user/work/.raytmp = 26 bytes.
-export RAY_TMPDIR="${RAY_TMPDIR:-/home/ma-user/work/.raytmp}"
+# Ray sockets need a SHORT path (<107 bytes for AF_UNIX). Prefer a path under
+# the shared work dir (persistent across container restarts), but fall back to
+# /tmp/.raytmp.<uid> when the work-dir path would exceed the 107-byte limit
+# (common on ModelArts mount prefixes like /inspire/legacy/tenant_.../dllm/).
+if [ -z "${RAY_TMPDIR:-}" ]; then
+    _RLCOMP_RAY_CAND="${RLCOMP_WORK_ROOT}/.raytmp"
+    if [ "${#_RLCOMP_RAY_CAND}" -lt 100 ]; then
+        RAY_TMPDIR="${_RLCOMP_RAY_CAND}"
+    else
+        RAY_TMPDIR="/tmp/.raytmp.$(id -u 2>/dev/null || echo 0)"
+    fi
+    unset _RLCOMP_RAY_CAND
+fi
+export RAY_TMPDIR
 if [ "${#RAY_TMPDIR}" -ge 107 ]; then
     echo "[bootstrap] ERROR: RAY_TMPDIR length ${#RAY_TMPDIR} >= 107 will break AF_UNIX sockets." >&2
+    echo "[bootstrap]        Override with RAY_TMPDIR=<short path> before sourcing." >&2
     return 1 2>/dev/null || exit 1
 fi
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${TMPDIR}/torch_ext}"
