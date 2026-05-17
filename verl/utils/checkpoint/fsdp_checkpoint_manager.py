@@ -167,4 +167,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
         torch.distributed.barrier()
 
-        self.previous_save_path = local_path
+        # Typo fix (was self.previous_save_path, missing the "d"): the base class
+        # remove_previous_save_local_path() reads self.previous_saved_path. The
+        # FSDP subclass was writing to a differently-named attribute, so the
+        # delete branch always saw None and silently no-op'd. As a result every
+        # save accumulated on disk despite trainer.remove_previous_ckpt_in_save=True.
+        # Verified on 2026-04-26: 5 ckpts (50,100,150,200,250) × 90 GB each =
+        # 450 GB on NFS instead of the expected ~90 GB single rolling ckpt.
+        # Megatron checkpoint manager already uses the correct "previous_saved_path"
+        # name (megatron_checkpoint_manager.py:294), so this aligns FSDP with it.
+        self.previous_saved_path = local_path

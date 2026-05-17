@@ -90,11 +90,28 @@ celerybeat-schedule
 
 # dotenv
 .env
+.env.*
 
 # virtualenv
 venv/
 .venv/
 ENV/
+
+# Project-local runtime assets. These are intentionally kept out of git; PR2
+# adds the offline cache/rebuild flow that populates them.
+.venv-rlcomp/
+.venv-rlcomp
+.venv-rlcomp-*/
+.python/
+wheels/
+.pip-cache/
+.uv-cache/
+model_store/
+
+# The generic `env/` virtualenv ignore above would otherwise hide the versioned
+# logging/bootstrap scripts under scripts/env/.
+!scripts/env/
+!scripts/env/*.sh
 
 # Spyder project settings
 .spyderproject
@@ -125,3 +142,5 @@ data/
 logs
 log
 outputs
+results/
+wandb/

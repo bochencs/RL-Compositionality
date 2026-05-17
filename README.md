@@ -13,6 +13,7 @@
 
 ## 🗂️ Table of Contents
 - [⚙️ Environment Setup](#️-environment-setup)
+- [🚦 Unified Pipeline Entrypoint](#-unified-pipeline-entrypoint)
 - [📁 Repository Layout](#-repository-layout)
 - [🧑‍🏫 Stage 1: Atomic Skill Acquisition](#-stage-1-atomic-skill-acquisition)
 - [🧩 Stage 2: Learning Compositional Skills](#-stage-2-learning-compositional-skills)
@@ -52,6 +53,85 @@
 
 ---
 
+## 🚦 Unified Pipeline Entrypoint
+
+This fork also provides `rlcomp.sh`, a single entrypoint for running the main
+string-task pipeline from a fresh shell on a shared filesystem machine. It
+centralizes environment bootstrap, GPU-count-aware runtime defaults, pipeline
+dispatch, and persistent logs.
+
+```bash
+# Activate the project environment in the current shell.
+source /path/to/RL-Compositionality/rlcomp.sh
+
+# Run one stage.
+bash /path/to/RL-Compositionality/rlcomp.sh env
+bash /path/to/RL-Compositionality/rlcomp.sh prepare
+bash /path/to/RL-Compositionality/rlcomp.sh stage1
+bash /path/to/RL-Compositionality/rlcomp.sh stage2
+bash /path/to/RL-Compositionality/rlcomp.sh infer
+
+# Or run the serial pipeline.
+bash /path/to/RL-Compositionality/rlcomp.sh all
+```
+
+Available actions:
+
+| action | purpose |
+|---|---|
+| `env` | Source `scripts/env/bootstrap.sh` and run an import sanity check. |
+| `prepare` | Generate the new-ops Stage 1 / Stage 2 datasets. |
+| `stage1` | Run Stage 1 RFT: vLLM rollout, filtering, then FSDP SFT. |
+| `stage2` | Run Stage 2 GRPO from the latest Stage 1 checkpoint. |
+| `infer` | Run the inference matrix and write evaluation records. |
+| `all` | Run `prepare -> stage1 -> stage2 -> infer`. |
+| `logs` | Browse persisted pipeline logs. |
+
+Every `bash rlcomp.sh <action>` invocation writes a run directory under
+`results/pipeline_runs/<timestamp>_<host>_<action>/`. Pipeline actions include
+both an outer terminal mirror and per-step logs:
+
+```text
+results/pipeline_runs/
+├── latest -> <run_id>/
+├── history.jsonl
+├── labbook.md
+└── <run_id>/
+    ├── terminal.stdout.log
+    ├── terminal.stderr.log
+    ├── invocation.context.txt
+    ├── invocation.meta.json
+    ├── <step>.stdout.log
+    ├── <step>.stderr.log
+    └── <step>.meta.json
+```
+
+Useful log commands:
+
+```bash
+bash rlcomp.sh logs              # latest run metadata and log paths
+bash rlcomp.sh logs peek 50      # one-shot tail of the most active run
+bash rlcomp.sh logs tail         # follow finalized latest stdout/stderr
+bash rlcomp.sh logs list         # recent history table
+bash rlcomp.sh logs show <id>    # show a specific run
+```
+
+Local credentials and machine-specific overrides can live in `.env.local`
+(gitignored). `bootstrap.sh` auto-exports those values before downstream
+scripts run:
+
+```bash
+WANDB_API_KEY=...
+WANDB_MODE=offline
+GPU_MEM_UTIL=0.70
+```
+
+The complete offline environment cache/rebuild flow is intentionally separated
+from this logging entrypoint and should be documented with the environment
+assets that populate `.venv-rlcomp/`.
+
+---
+
 ## 📁 Repository Layout
 
 * [`bash/`](bash): One-click pipelines grouped by paper section numbers.
@@ -60,6 +140,9 @@
   * [`section43/`](bash/section43): Countdown data generation and transfer experiments.
   * [`section44/`](bash/section44): Pass@k evaluation utilities.
 * [`examples/`](examples): Python entrypoints used by the bash scripts.
+* [`rlcomp.sh`](rlcomp.sh): Unified pipeline entrypoint with structured logging.
+* [`scripts/env/`](scripts/env): Bootstrap, dispatch, and log-viewer helpers for `rlcomp.sh`.
+* [`scripts/experiments/`](scripts/experiments): Stage scripts used by `rlcomp.sh`.
 
 ---
 

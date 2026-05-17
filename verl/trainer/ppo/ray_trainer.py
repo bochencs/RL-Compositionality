@@ -46,6 +46,20 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn, BufferedDataL
 from verl.utils.tracking import ValidationGenerationsLogger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
+import torch.multiprocessing as _torch_mp
+
+# Belt-and-suspenders for small /dev/shm hosts (K8s pods default to 64 MiB).
+# Mirrors the same call in verl/trainer/fsdp_sft_trainer.py. The primary fix
+# for stage2's "Bus error / out of shared memory" is num_workers=0 below
+# (see config.data.get('num_workers', 0) usage), which sidesteps shm IPC
+# entirely. This call is a no-op when num_workers=0; if a caller re-enables
+# workers (data.num_workers>0) on a small-shm host, 'file_system' sharing
+# uses $TMPDIR-backed fd handoff instead of /dev/shm-backed mmap, preventing
+# SIGBUS at the very first val_dataloader / train_dataloader iteration.
+try:
+    _torch_mp.set_sharing_strategy('file_system')
+except (RuntimeError, ValueError):
+    pass
 
 WorkerType = Type[Worker]
 
@@ -442,9 +456,19 @@ class RayPPOTrainer(object):
         else:
             sampler = SequentialSampler(data_source=self.train_dataset)
 
+        # DataLoader worker count. Default 0 (main-thread loading) avoids
+        # SIGBUS on K8s pods with small /dev/shm (64 MiB default). The
+        # previously hardcoded num_workers=8 crashed stage2 on 2026-04-25:
+        # 4 ranks x 8 workers x prefetch_factor=2 across the val_dataloader
+        # (whose batch_size=len(val_dataset)=4096 by design) cannot fit
+        # /dev/shm and triggers "Bus error / out of shared memory" at the
+        # first iter of _validate(). Override via `data.num_workers=N`
+        # Hydra arg on hosts with abundant shm. bootstrap.sh + the stage2
+        # launcher thread `SFT_NUM_WORKERS` in as `+data.num_workers=N`.
+        _num_workers = int(self.config.data.get('num_workers', 0))
         self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
                                                    batch_size=self.config.data.gen_batch_size,
-                                                   num_workers=8,
+                                                   num_workers=_num_workers,
                                                    drop_last=True,
                                                    collate_fn=collate_fn,
                                                    sampler=sampler)
@@ -473,7 +497,7 @@ class RayPPOTrainer(object):
             # Validation datasets are sent to inference engines as a whole batch,
             # which will schedule the memory themselves.
             batch_size=len(self.val_dataset),
-            num_workers=8,
+            num_workers=_num_workers,
             shuffle=False,
             drop_last=False,
             collate_fn=collate_fn)
