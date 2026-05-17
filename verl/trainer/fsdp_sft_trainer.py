@@ -25,9 +25,23 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 
 import logging
 import re
+import warnings
 from contextlib import nullcontext
 import torch
 import torch.distributed
+import torch.multiprocessing as _torch_mp
+# Belt-and-suspenders for small /dev/shm environments (e.g. the default K8s
+# pod gives 64 MiB). The primary fix is num_workers=0 below, which bypasses
+# shared-memory IPC entirely; this call is a no-op in that case. If a caller
+# re-enables workers (data.num_workers>0) on a host with tight /dev/shm,
+# 'file_system' sharing uses $TMPDIR-backed fd handoff instead of
+# /dev/shm-backed mmap, preventing SIGBUS / "Bus error" at iter-0.
+# Known trade-off: on some kernels 'file_system' leaks fds when workers die
+# mid-epoch; only a concern if workers are re-enabled by the caller.
+try:
+    _torch_mp.set_sharing_strategy('file_system')
+except (RuntimeError, ValueError):
+    pass
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy, CPUOffload
 from tqdm import tqdm
@@ -35,7 +49,18 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedModel, A
 from verl.utils.torch_functional import get_cosine_schedule_with_warmup
 from tensordict import TensorDict
 from torch.utils.data import DataLoader, DistributedSampler
-from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+    FLASH_ATTN_BERT_PADDING_AVAILABLE = True
+    FLASH_ATTN_BERT_PADDING_IMPORT_ERROR = None
+except Exception as flash_attn_import_error:  # pragma: no cover
+    pad_input = None
+    unpad_input = None
+    rearrange = None
+    index_first_axis = None
+    FLASH_ATTN_BERT_PADDING_AVAILABLE = False
+    FLASH_ATTN_BERT_PADDING_IMPORT_ERROR = flash_attn_import_error
 
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy, init_fn, get_init_weight_context_manager
 from verl.utils.dataset import SFTDataset
@@ -54,6 +79,24 @@ from verl import DataProto
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_SFT_LOGGING_LEVEL', 'WARN'))
+
+
+def get_attn_implementation(preferred: str = 'flash_attention_2') -> str:
+    override = os.getenv('VERL_ATTN_IMPLEMENTATION', None)
+    if override:
+        return override
+
+    if preferred != 'flash_attention_2':
+        return preferred
+
+    try:
+        import flash_attn  # noqa: F401
+        return preferred
+    except Exception as import_error:
+        warnings.warn(
+            f'flash-attn is not available ({import_error!r}); fallback to eager attention. '
+            f'Set VERL_ATTN_IMPLEMENTATION to override.')
+        return 'eager'
 
 
 def extract_step(path):
@@ -84,6 +127,10 @@ class FSDPSFTTrainer(object):
         self.sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         # build tokenizer first
         local_model_path = copy_to_local(src=self.config.model.partial_pretrain, verbose=True)
+        if self.config.model.get('external_lib', None) is not None:
+            # Import external tokenizer/model registration hooks before tokenizer loading.
+            import importlib
+            importlib.import_module(self.config.model.external_lib)
         from verl.utils import hf_tokenizer
         self.tokenizer = hf_tokenizer(local_model_path, trust_remote_code=self.config.model.trust_remote_code)
         if self.config.data.chat_template is not None:
@@ -95,6 +142,11 @@ class FSDPSFTTrainer(object):
         # Set sequence parallel size
         self.config.ulysses_sequence_parallel_size = getattr(self.config, 'ulysses_sequence_parallel_size', 1)
         self.use_remove_padding = getattr(self.config, 'use_remove_padding', False)
+        if self.use_remove_padding and self.config.ulysses_sequence_parallel_size > 1 and \
+                not FLASH_ATTN_BERT_PADDING_AVAILABLE:
+            raise ImportError(
+                'use_remove_padding=True with ulysses_sequence_parallel_size>1 requires flash_attn. '
+                f'Original import error: {FLASH_ATTN_BERT_PADDING_IMPORT_ERROR!r}')
         if self.device_mesh.get_rank() == 0:
             print(f'Using sequence parallel size: {self.config.ulysses_sequence_parallel_size}')
             print(f'Using remove padding: {self.use_remove_padding}')
@@ -159,10 +211,21 @@ class FSDPSFTTrainer(object):
                                                 num_replicas=world_size,
                                                 rank=rank,
                                                 drop_last=True)
+        # num_workers default is 0 (main-thread data loading) because the
+        # previously hardcoded num_workers=8 crashed on K8s pods whose
+        # /dev/shm defaults to 64 MiB: 4 ranks x 8 workers x 2 dataloaders
+        # prefetching 128 x 3072 int64 batches (~12 MB each) cannot fit and
+        # throws RuntimeError "Bus error / No space left on device (errno 28)"
+        # at iter 0, before any training step completes. Override via
+        # `data.num_workers=N` on hosts with abundant shm (default kept at 0
+        # for correctness across all known deploy targets). Callers can set
+        # SFT_NUM_WORKERS env var; bootstrap.sh + run_stage1_newops_rft.sh
+        # thread it through as a Hydra override.
+        _num_workers = int(config.data.get('num_workers', 0))
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
                                            batch_size=config.data.train_batch_size,
                                            sampler=self.train_sampler,
-                                           num_workers=8,
+                                           num_workers=_num_workers,
                                            pin_memory=True,
                                            drop_last=True)
 
@@ -174,7 +237,7 @@ class FSDPSFTTrainer(object):
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=config.data.micro_batch_size_per_gpu,
                                          sampler=self.val_sampler,
-                                         num_workers=8,
+                                         num_workers=_num_workers,
                                          pin_memory=True,
                                          drop_last=True)
 
@@ -207,11 +270,26 @@ class FSDPSFTTrainer(object):
         init_context = get_init_weight_context_manager(use_meta_tensor=not config.tie_word_embeddings,
                                                        mesh=self.device_mesh)
 
+        # Model dtype: fp32 is the safe default (matches FSDP reduce_dtype),
+        # but memory-constrained single-GPU setups need bf16 to fit. Respect
+        # an explicit hydra override (model.dtype) or env fallback (VERL_SFT_MODEL_DTYPE).
+        # Guard .get() against OmegaConf struct mode where the key is absent.
+        try:
+            _sft_dtype_cfg = self.config.model.get('dtype', None)
+        except Exception:
+            _sft_dtype_cfg = None
+        _sft_dtype_str = str(_sft_dtype_cfg
+                             or os.environ.get('VERL_SFT_MODEL_DTYPE', 'fp32'))
+        _sft_dtype_map = {'fp32': torch.float32, 'float32': torch.float32,
+                          'bf16': torch.bfloat16, 'bfloat16': torch.bfloat16,
+                          'fp16': torch.float16, 'float16': torch.float16}
+        _sft_dtype = _sft_dtype_map.get(_sft_dtype_str.lower(), torch.float32)
         with init_context():
             self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(local_model_path,
                                                                                config=config,
-                                                                               torch_dtype=torch.float32,
-                                                                               attn_implementation='flash_attention_2',
+                                                                               torch_dtype=_sft_dtype,
+                                                                               attn_implementation=get_attn_implementation(
+                                                                                   'flash_attention_2'),
                                                                                trust_remote_code=trust_remote_code)
 
             # Apply Liger kernel if use_liger is enabled
