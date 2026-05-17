@@ -86,10 +86,8 @@ _rlcomp_log_runs_root() {
         printf '%s\n' "${fallback}"
         return 0
     fi
-    # Last resort: /tmp scoped by user.
-    local tmproot="${TMPDIR:-/tmp}/rlcomp-${USER:-unknown}-pipeline_runs"
-    mkdir -p "${tmproot}"
-    printf '%s\n' "${tmproot}"
+    printf '[rlcomp] ERROR: no writable repo-local log directory under %s\n' "${RLCOMP_REPO_ROOT}" >&2
+    return 1
 }
 
 # ---------- rlcomp_log_init <action> <argv...> --------------------------------

@@ -102,11 +102,17 @@ ENV/
 .venv-rlcomp/
 .venv-rlcomp
 .venv-rlcomp-*/
+.venv-wheelbuilder/
 .python/
 wheels/
 .pip-cache/
 .uv-cache/
 model_store/
+offline_bundle_manifest*.txt
+offline_bundle_manifest*.json
+rlcomp-offline*.tar
+.tmp/
+.raytmp/
 
 # The generic `env/` virtualenv ignore above would otherwise hide the versioned
 # logging/bootstrap scripts under scripts/env/.

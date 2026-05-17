@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# RL-Compositionality — single-entrypoint script for env setup, training,
-# and inference. Designed to work on any machine that shares this repo's
-# filesystem (e.g. Huawei ModelArts clusters under /home/ma-user/work/...).
+# RL-Compositionality — single-entrypoint script for offline environment setup,
+# training, inference, and shared-filesystem logs.
 #
-# The full offline cache/rebuild flow lives in a follow-up branch. This script
-# is the reusable pipeline/logging layer: it assumes the project environment is
-# already available at .venv-rlcomp/ and focuses on repeatable dispatch.
+# This repo carries a file-based offline environment contract:
+#   - bootstrap-cache  populates .python/ and wheels/ on a networked machine.
+#   - fetch-assets     populates model_store/ and data/string_task/.
+#   - install          rebuilds .venv-rlcomp/ without network access.
+#   - doctor           verifies the local offline environment and smoke imports.
 #
 # USAGE
 # -----
@@ -22,6 +23,11 @@
 #     stage2    Stage 2 GRPO (needs >=4 GPU for full 8B model).
 #     infer     Inference matrix.
 #     all       prepare -> stage1 -> stage2 -> infer (serial).
+#     install   Rebuild .venv-rlcomp/ from repo-local Python + wheels.
+#     doctor    Diagnose offline env, imports, CUDA, assets, and paths.
+#     bootstrap-cache  Populate .python/ and wheels/ on a networked machine.
+#     fetch-assets     Download HF model/data assets into repo-local paths.
+#     package-offline  Verify or tar the complete offline bundle.
 #     logs      View pipeline logs. Sub: (none) | tail | list | cat | show <id>
 #
 # Every invocation writes a log dir under
@@ -35,6 +41,13 @@ _RLCOMP_HERE="$(cd "$(dirname "${_RLCOMP_SELF}")" && pwd)"
 _RLCOMP_BOOT="${_RLCOMP_HERE}/scripts/env/bootstrap.sh"
 _RLCOMP_RUN="${_RLCOMP_HERE}/scripts/env/run.sh"
 _RLCOMP_LOGS="${_RLCOMP_HERE}/scripts/env/logs.sh"
+_RLCOMP_LIB_LOGGING="${_RLCOMP_HERE}/scripts/env/lib_logging.sh"
+_RLCOMP_INSTALL="${_RLCOMP_HERE}/scripts/env/install_hermetic.sh"
+_RLCOMP_DOCTOR="${_RLCOMP_HERE}/scripts/env/doctor.sh"
+_RLCOMP_FREEZE="${_RLCOMP_HERE}/scripts/env/freeze.sh"
+_RLCOMP_CACHE_BOOTSTRAP="${_RLCOMP_HERE}/scripts/env/bootstrap_offline_cache.sh"
+_RLCOMP_FETCH_ASSETS="${_RLCOMP_HERE}/scripts/env/fetch_assets.sh"
+_RLCOMP_PACKAGE_OFFLINE="${_RLCOMP_HERE}/scripts/env/package_offline_bundle.sh"
 
 if [ ! -f "${_RLCOMP_BOOT}" ]; then
     echo "[rlcomp] ERROR: cannot find ${_RLCOMP_BOOT}" >&2
@@ -77,17 +90,15 @@ shift || true
 # Skipped for viewer / help / unknown actions — they exit fast with usage text
 # and produce nothing worth preserving.
 case "${ACTION}" in
-    env|prepare|stage1|stage2|infer|all)
+    env|prepare|stage1|stage2|infer|all|install|doctor|freeze|bootstrap-cache|cache|fetch-assets|assets|package-offline|bundle)
         _rl_ts="$(date +%Y%m%d_%H%M%S)"
         _rl_host="$(hostname 2>/dev/null | tr -d '\r\n' | tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)"
         _rl_host="${_rl_host:-unknown}"
         _rl_runs_root="${_RLCOMP_HERE}/results/pipeline_runs"
         if ! mkdir -p "${_rl_runs_root}" 2>/dev/null || [ ! -w "${_rl_runs_root}" ]; then
             _rl_runs_root="${_RLCOMP_HERE}/logs/pipeline_runs"
-            if ! mkdir -p "${_rl_runs_root}" 2>/dev/null || [ ! -w "${_rl_runs_root}" ]; then
-                _rl_runs_root="${TMPDIR:-/tmp}/rlcomp-${USER:-u}-pipeline_runs"
-                mkdir -p "${_rl_runs_root}" 2>/dev/null || _rl_runs_root=""
-            fi
+            mkdir -p "${_rl_runs_root}" 2>/dev/null || _rl_runs_root=""
+            [ -w "${_rl_runs_root}" ] || _rl_runs_root=""
         fi
         _rl_run_dir=""
         if [ -n "${_rl_runs_root}" ]; then
@@ -136,10 +147,41 @@ case "${ACTION}" in
         ;;
 esac
 
+_rlcomp_wrap() {
+    local action="$1"
+    shift
+    if [ -f "${_RLCOMP_LIB_LOGGING}" ]; then
+        # shellcheck disable=SC1090
+        source "${_RLCOMP_LIB_LOGGING}"
+        rlcomp_log_wrap "${action}" "$@"
+    else
+        echo "[rlcomp] WARN: logging helper missing; running without inner logs" >&2
+        "$@"
+    fi
+}
+
 case "${ACTION}" in
     env|prepare|stage1|stage2|infer|all)
         # run.sh already owns its own per-invocation logging. Do NOT wrap.
         exec bash "${_RLCOMP_RUN}" "${ACTION}" "$@"
+        ;;
+    install)
+        _rlcomp_wrap install bash "${_RLCOMP_INSTALL}" "$@"
+        ;;
+    doctor)
+        _rlcomp_wrap doctor bash "${_RLCOMP_DOCTOR}" "$@"
+        ;;
+    freeze)
+        _rlcomp_wrap freeze bash "${_RLCOMP_FREEZE}" "$@"
+        ;;
+    bootstrap-cache|cache)
+        _rlcomp_wrap bootstrap-cache bash "${_RLCOMP_CACHE_BOOTSTRAP}" "$@"
+        ;;
+    fetch-assets|assets)
+        _rlcomp_wrap fetch-assets bash "${_RLCOMP_FETCH_ASSETS}" "$@"
+        ;;
+    package-offline|bundle)
+        _rlcomp_wrap package-offline bash "${_RLCOMP_PACKAGE_OFFLINE}" "$@"
         ;;
     logs)
         exec bash "${_RLCOMP_LOGS}" "$@"
@@ -149,7 +191,7 @@ case "${ACTION}" in
         ;;
     *)
         echo "[rlcomp] Unknown action: ${ACTION}" >&2
-        echo "[rlcomp] Try: env | prepare | stage1 | stage2 | infer | all | logs" >&2
+        echo "[rlcomp] Try: env | prepare | stage1 | stage2 | infer | all | install | doctor | bootstrap-cache | fetch-assets | package-offline | logs" >&2
         exit 2
         ;;
 esac

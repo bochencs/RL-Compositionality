@@ -5,7 +5,7 @@ set -x
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
-# Keep temp files and Ray session artifacts off root disk by default.
+# Keep temp files and Ray session artifacts inside the project directory by default.
 TMP_WORK_DIR="${TMP_WORK_DIR:-${ROOT_DIR}/.tmp}"
 export TMPDIR="${TMPDIR:-${TMP_WORK_DIR}}"
 export TMP="${TMP:-${TMPDIR}}"
@@ -15,7 +15,7 @@ _RAY_CAND="${ROOT_DIR}/.raytmp"
 if [ "${#_RAY_CAND}" -lt 100 ]; then
     export RAY_TMPDIR="${RAY_TMPDIR:-${_RAY_CAND}}"
 else
-    export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/.raytmp.$(id -u 2>/dev/null || echo 0)}"
+    export RAY_TMPDIR="${RAY_TMPDIR:-.raytmp}"
 fi
 unset _RAY_CAND
 mkdir -p "${TMPDIR}" "${RAY_TMPDIR}"
