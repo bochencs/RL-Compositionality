@@ -19,11 +19,10 @@ _RAY_CAND="${ROOT_DIR}/.raytmp"
 if [ "${#_RAY_CAND}" -lt 100 ]; then
     RAY_TMPDIR="${RAY_TMPDIR:-${_RAY_CAND}}"
 else
-    RAY_TMPDIR="${RAY_TMPDIR:-/tmp/.raytmp.$(id -u 2>/dev/null || echo 0)}"
+    RAY_TMPDIR="${RAY_TMPDIR:-.raytmp}"
 fi
 unset _RAY_CAND
-# Use local /tmp for short-lived temp files to avoid NFS ".nfs*" cleanup races.
-TMPDIR="${TMPDIR:-/tmp}"
+TMPDIR="${TMPDIR:-${ROOT_DIR}/.tmp}"
 SAVE_ROOT="${SAVE_ROOT:-checkpoints_fresh/stage2_runs/${TRACK_NAME}}"
 AUTO_RESUME="${AUTO_RESUME:-0}"  # 0: always fresh run, 1: auto-resume from latest ckpt
 

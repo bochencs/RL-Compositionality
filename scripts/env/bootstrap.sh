@@ -47,13 +47,31 @@ fi
 
 cd "${RLCOMP_REPO_ROOT}"
 
+_rlcomp_project_path() {
+    local label="$1"
+    local raw="$2"
+    local abs
+    case "${raw}" in
+        /*) abs="$(realpath -m "${raw}")" ;;
+        *)  abs="$(realpath -m "${RLCOMP_REPO_ROOT}/${raw}")" ;;
+    esac
+    case "${abs}" in
+        "${RLCOMP_REPO_ROOT}"|"${RLCOMP_REPO_ROOT}"/*) printf '%s\n' "${abs}" ;;
+        *)
+            echo "[bootstrap] ERROR: ${label} must be inside the current project directory: ${RLCOMP_REPO_ROOT}" >&2
+            echo "[bootstrap]        got: ${abs}" >&2
+            return 1
+            ;;
+    esac
+}
+
 # ---------- 2. drop proxies (per README) ----------
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 
 # ---------- 2a. normalize pip config if a repo-local config exists ----------
 # Huawei ModelArts images pre-set PIP_INDEX_URL to a mirror that lacks many
-# pinned versions. A follow-up offline-environment PR adds a versioned
-# pip.conf; when present, prefer it over host-level mirror settings.
+# pinned versions. Prefer the repo-local pip.conf over host-level mirror
+# settings so online cache builds and local repairs use the same indexes.
 unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_NO_CACHE_DIR \
       MA_PIP_URL MA_PIP_HOST
 if [ -f "${RLCOMP_REPO_ROOT}/pip.conf" ]; then
@@ -73,13 +91,12 @@ if [ -f "${RLCOMP_REPO_ROOT}/.env.local" ]; then
 fi
 
 # ---------- 3. activate venv ----------
-# The pipeline expects an already-created project venv under .venv-rlcomp/.
-# The offline cache/rebuild scripts that create or repair this venv are added
-# in the follow-up environment PR.
+# The pipeline expects a project venv under .venv-rlcomp/. Rebuild it from the
+# repo-local offline cache with `bash rlcomp.sh install`.
 _RLCOMP_VENV="${RLCOMP_REPO_ROOT}/.venv-rlcomp"
 if [ ! -f "${_RLCOMP_VENV}/bin/activate" ]; then
     echo "[bootstrap] ERROR: venv not found at ${_RLCOMP_VENV}." >&2
-    echo "[bootstrap] Create or link the project environment before running rlcomp.sh." >&2
+    echo "[bootstrap] Run: bash rlcomp.sh install" >&2
     unset _RLCOMP_VENV
     return 1 2>/dev/null || exit 1
 fi
@@ -153,20 +170,21 @@ esac
 # Derive from repo root rather than hardcoding an absolute path, so the
 # same script works on any mount point (shared FS, different container path).
 # Pseudo-root mode: everything lives inside the repo by default.
-# Override RLCOMP_WORK_ROOT before sourcing if you want models/caches outside.
-export RLCOMP_WORK_ROOT="${RLCOMP_WORK_ROOT:-${RLCOMP_REPO_ROOT}}"
-export MODEL_STORE_ROOT="${MODEL_STORE_ROOT:-${RLCOMP_WORK_ROOT}/model_store}"
-export HF_MODEL_ROOT="${HF_MODEL_ROOT:-${MODEL_STORE_ROOT}/hf_models}"
-export HF_CACHE_ROOT="${HF_CACHE_ROOT:-${MODEL_STORE_ROOT}/hf_cache}"
-export HF_HOME="${HF_HOME:-${HF_CACHE_ROOT}}"
-export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_CACHE_ROOT}/hub}"
-export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_CACHE_ROOT}/transformers}"
+RLCOMP_WORK_ROOT="$(_rlcomp_project_path RLCOMP_WORK_ROOT "${RLCOMP_WORK_ROOT:-${RLCOMP_REPO_ROOT}}")" || return 1 2>/dev/null || exit 1
+MODEL_STORE_ROOT="$(_rlcomp_project_path MODEL_STORE_ROOT "${MODEL_STORE_ROOT:-${RLCOMP_WORK_ROOT}/model_store}")" || return 1 2>/dev/null || exit 1
+HF_MODEL_ROOT="$(_rlcomp_project_path HF_MODEL_ROOT "${HF_MODEL_ROOT:-${MODEL_STORE_ROOT}/hf_models}")" || return 1 2>/dev/null || exit 1
+HF_CACHE_ROOT="$(_rlcomp_project_path HF_CACHE_ROOT "${HF_CACHE_ROOT:-${MODEL_STORE_ROOT}/hf_cache}")" || return 1 2>/dev/null || exit 1
+HF_HOME="$(_rlcomp_project_path HF_HOME "${HF_HOME:-${HF_CACHE_ROOT}}")" || return 1 2>/dev/null || exit 1
+HUGGINGFACE_HUB_CACHE="$(_rlcomp_project_path HUGGINGFACE_HUB_CACHE "${HUGGINGFACE_HUB_CACHE:-${HF_CACHE_ROOT}/hub}")" || return 1 2>/dev/null || exit 1
+TRANSFORMERS_CACHE="$(_rlcomp_project_path TRANSFORMERS_CACHE "${TRANSFORMERS_CACHE:-${HF_CACHE_ROOT}/transformers}")" || return 1 2>/dev/null || exit 1
+export RLCOMP_WORK_ROOT MODEL_STORE_ROOT HF_MODEL_ROOT HF_CACHE_ROOT HF_HOME HUGGINGFACE_HUB_CACHE TRANSFORMERS_CACHE
 
 # ---------- 6. temp / scratch ----------
 # Repo-local .tmp for most short-lived files (shared FS, visible across nodes).
-export TMPDIR="${TMPDIR:-${RLCOMP_REPO_ROOT}/.tmp}"
-export TMP="${TMP:-${TMPDIR}}"
-export TEMP="${TEMP:-${TMPDIR}}"
+TMPDIR="$(_rlcomp_project_path TMPDIR "${TMPDIR:-${RLCOMP_REPO_ROOT}/.tmp}")" || return 1 2>/dev/null || exit 1
+TMP="$(_rlcomp_project_path TMP "${TMP:-${TMPDIR}}")" || return 1 2>/dev/null || exit 1
+TEMP="$(_rlcomp_project_path TEMP "${TEMP:-${TMPDIR}}")" || return 1 2>/dev/null || exit 1
+export TMPDIR TMP TEMP
 # Ray sockets need a SHORT path: AF_UNIX's sockaddr_un.sun_path caps the full
 # socket name at 107 bytes (108 incl NUL). Ray appends
 #     /ray/session_<YYYY-MM-DD_HH-MM-SS>_<microsec>_<pid>/sockets/plasma_store
@@ -181,9 +199,9 @@ export TEMP="${TEMP:-${TMPDIR}}"
 # because RLCOMP_WORK_ROOT/.raytmp = 46 bytes left only 61 bytes for the 66-byte
 # suffix Ray generated. Budget check below uses the real limit.
 #
-# Prefer a path under the shared work dir (persistent, cross-node visible), but
-# fall back to /tmp/.raytmp.<uid> (per-node, not shared — fine for runtime
-# sockets) when the work-dir path exceeds the budget.
+# Prefer a path under the shared work dir (persistent, cross-node visible). If
+# the absolute repo path is too long for Ray sockets, use a short relative path
+# under the current repo instead of writing outside the project directory.
 _RLCOMP_RAY_SUFFIX_MAX=69
 _RLCOMP_RAY_BUDGET=$((107 - _RLCOMP_RAY_SUFFIX_MAX))  # = 38
 if [ -z "${RAY_TMPDIR:-}" ]; then
@@ -191,9 +209,15 @@ if [ -z "${RAY_TMPDIR:-}" ]; then
     if [ "${#_RLCOMP_RAY_CAND}" -le "${_RLCOMP_RAY_BUDGET}" ]; then
         RAY_TMPDIR="${_RLCOMP_RAY_CAND}"
     else
-        RAY_TMPDIR="/tmp/.raytmp.$(id -u 2>/dev/null || echo 0)"
+        RAY_TMPDIR=".raytmp"
     fi
     unset _RLCOMP_RAY_CAND
+else
+    _RLCOMP_RAY_ABS="$(_rlcomp_project_path RAY_TMPDIR "${RAY_TMPDIR}")" || return 1 2>/dev/null || exit 1
+    if [ "${RAY_TMPDIR#/}" != "${RAY_TMPDIR}" ]; then
+        RAY_TMPDIR="${_RLCOMP_RAY_ABS}"
+    fi
+    unset _RLCOMP_RAY_ABS
 fi
 export RAY_TMPDIR
 # Sanity check: RAY_TMPDIR may be too long because (a) the user explicitly set
@@ -205,16 +229,15 @@ export RAY_TMPDIR
 # error: Ray would crash at ray.init() anyway, so rescuing is strictly safer.
 if [ "${#RAY_TMPDIR}" -gt "${_RLCOMP_RAY_BUDGET}" ]; then
     _RLCOMP_RAY_OLD="${RAY_TMPDIR}"
-    RAY_TMPDIR="/tmp/.raytmp.$(id -u 2>/dev/null || echo 0)"
+    RAY_TMPDIR=".raytmp"
     export RAY_TMPDIR
     echo "[bootstrap] WARN: inherited RAY_TMPDIR='${_RLCOMP_RAY_OLD}' (${#_RLCOMP_RAY_OLD} bytes)" >&2
     echo "[bootstrap]       exceeds ${_RLCOMP_RAY_BUDGET}-byte budget (AF_UNIX cap 107 - suffix ${_RLCOMP_RAY_SUFFIX_MAX})." >&2
-    echo "[bootstrap]       Auto-falling back to RAY_TMPDIR='${RAY_TMPDIR}' (${#RAY_TMPDIR} bytes)." >&2
+    echo "[bootstrap]       Auto-falling back to repo-local RAY_TMPDIR='${RAY_TMPDIR}' (${#RAY_TMPDIR} bytes)." >&2
     unset _RLCOMP_RAY_OLD
 fi
-# Final defensive check: fallback path itself could be too long on exotic
-# systems (e.g. /tmp remapped to a long container path). This really is
-# unrecoverable without caller help.
+# Final defensive check: the repo-local relative fallback should be short, but
+# keep the guard in case a caller explicitly supplied a long relative value.
 if [ "${#RAY_TMPDIR}" -gt "${_RLCOMP_RAY_BUDGET}" ]; then
     echo "[bootstrap] ERROR: even fallback RAY_TMPDIR='${RAY_TMPDIR}' (${#RAY_TMPDIR} bytes)" >&2
     echo "[bootstrap]        exceeds ${_RLCOMP_RAY_BUDGET}-byte budget. Set a short RAY_TMPDIR manually." >&2
@@ -222,8 +245,9 @@ if [ "${#RAY_TMPDIR}" -gt "${_RLCOMP_RAY_BUDGET}" ]; then
     return 1 2>/dev/null || exit 1
 fi
 unset _RLCOMP_RAY_SUFFIX_MAX _RLCOMP_RAY_BUDGET
-export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${TMPDIR}/torch_ext}"
-export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${TMPDIR}/triton}"
+TORCH_EXTENSIONS_DIR="$(_rlcomp_project_path TORCH_EXTENSIONS_DIR "${TORCH_EXTENSIONS_DIR:-${TMPDIR}/torch_ext}")" || return 1 2>/dev/null || exit 1
+TRITON_CACHE_DIR="$(_rlcomp_project_path TRITON_CACHE_DIR "${TRITON_CACHE_DIR:-${TMPDIR}/triton}")" || return 1 2>/dev/null || exit 1
+export TORCH_EXTENSIONS_DIR TRITON_CACHE_DIR
 
 # ---------- 6b. SFT DataLoader workers vs. /dev/shm size ----------
 # PyTorch DataLoader with num_workers>0 uses /dev/shm (tmpfs) to ferry collated
@@ -523,12 +547,25 @@ _rlcomp_gpu_brief() {
 _rlcomp_git_branch() {
     (cd "${RLCOMP_REPO_ROOT}" && git rev-parse --abbrev-ref HEAD 2>/dev/null) || echo "unknown"
 }
+_rlcomp_hermetic_status() {
+    local ok=1
+    [ -d "${RLCOMP_REPO_ROOT}/.python" ] || ok=0
+    [ -d "${RLCOMP_REPO_ROOT}/wheels" ] || ok=0
+    [ -f "${RLCOMP_REPO_ROOT}/requirements.lock.txt" ] || ok=0
+    [ -f "${RLCOMP_REPO_ROOT}/pip.conf" ] || ok=0
+    if [ "${ok}" -eq 1 ]; then
+        echo "ready"
+    else
+        echo "incomplete; run bash rlcomp.sh bootstrap-cache on a networked machine"
+    fi
+}
 cat <<BANNER
 [rlcomp-bootstrap] ready
   repo root      : ${RLCOMP_REPO_ROOT}
   git branch     : $(_rlcomp_git_branch)
   venv           : ${VIRTUAL_ENV}
   python         : $(${RLCOMP_PYTHON} -V 2>&1 | tr -d '\n')
+  offline cache  : $(_rlcomp_hermetic_status)
   GPUs           : ${N_GPUS_PER_NODE} x $(_rlcomp_gpu_brief)  (gpu_memory_utilization=${GPU_MEM_UTIL})
   libcuda        : $(python -c 'import ctypes, sys; sys.stderr.write(""); print(ctypes.CDLL("libcuda.so.1")._name)' 2>/dev/null || echo "NOT FOUND — Triton/vLLM will fail")
   FSDP offload   : actor_param=${ACTOR_PARAM_OFFLOAD}, actor_optim=${ACTOR_OPTIMIZER_OFFLOAD}, ref_param=${REF_PARAM_OFFLOAD}
@@ -540,6 +577,6 @@ cat <<BANNER
   WANDB_MODE     : ${WANDB_MODE} (dir: ${WANDB_DIR})
   save policy    : save_freq=${SAVE_FREQ}, test_freq=${TEST_FREQ}, remove_previous_ckpt_in_save=${REMOVE_PREVIOUS_CKPT_IN_SAVE}, keep_last_n=${RLCOMP_KEEP_LAST_N}
   disk (work FS) : $(_rlcomp_free_disk)
-Next: bash scripts/env/run.sh {prepare|stage1|stage2|infer|all}
+Next: bash rlcomp.sh {env|prepare|stage1|stage2|infer|all}
 BANNER
-unset -f _rlcomp_free_disk _rlcomp_gpu_brief _rlcomp_git_branch
+unset -f _rlcomp_free_disk _rlcomp_gpu_brief _rlcomp_git_branch _rlcomp_hermetic_status _rlcomp_project_path

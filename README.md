@@ -13,6 +13,7 @@
 
 ## 🗂️ Table of Contents
 - [⚙️ Environment Setup](#️-environment-setup)
+- [📦 Hermetic Offline Environment](#-hermetic-offline-environment)
 - [🚦 Unified Pipeline Entrypoint](#-unified-pipeline-entrypoint)
 - [📁 Repository Layout](#-repository-layout)
 - [🧑‍🏫 Stage 1: Atomic Skill Acquisition](#-stage-1-atomic-skill-acquisition)
@@ -42,6 +43,9 @@
    pip install flash-attn --no-build-isolation
    ```
 
+   The fork-local `rlcomp.sh` workflow below also supports a hermetic Python
+   3.10 environment that can be rebuilt without internet access.
+
 3. **Login to Wandb** 🔑
 
    ```bash
@@ -50,6 +54,98 @@
 
 4. **Model checkpoints** 📂
    Update `MODEL_PATH` variables inside the bash scripts if your checkpoint is stored elsewhere.
+
+---
+
+## 📦 Hermetic Offline Environment
+
+The reusable offline workflow is file-based. The PR tracks the recipe and
+helper scripts, while the heavy generated assets stay gitignored:
+
+- Versioned recipe files: `requirements.lock.txt`, `pip.conf`, `rlcomp.sh`,
+  and `scripts/env/*.sh`.
+- Generated runtime assets: `.python/`, `wheels/`, `.pip-cache/`,
+  `.venv-rlcomp/`, `model_store/`, `.tmp/`, `.raytmp/`, and `data/`.
+- Environment build outputs are intentionally constrained to the current
+  project directory. The scripts reject cache, model, data, manifest, and tar
+  paths that resolve outside the repo root.
+
+Build the cache once on a networked Linux x86_64 machine:
+
+```bash
+# Downloads standalone Python 3.10 plus all pinned wheels into .python/ and wheels/.
+bash rlcomp.sh bootstrap-cache
+
+# Downloads the Stage 1 model and string-task datasets into model_store/ and data/.
+bash rlcomp.sh fetch-assets
+
+# Verifies the transferable cache. Add --with-venv after install if the archive
+# should include a prebuilt .venv-rlcomp/ as well.
+bash rlcomp.sh package-offline --check
+bash rlcomp.sh package-offline --manifest results/offline_bundle_manifest.txt
+
+# Builds .venv-rlcomp from the local files on the cache builder, useful when
+# transferring a ready-to-source environment on the same shared filesystem.
+bash rlcomp.sh install --force
+bash rlcomp.sh doctor
+```
+
+Then on an offline machine that can see the same files:
+
+```bash
+# Rebuilds .venv-rlcomp using only repo-local .python/, wheels/, and the lockfile.
+bash rlcomp.sh install --force
+
+# Checks Python, wheels, imports, CUDA/libcuda, model/data assets, and writable paths.
+bash rlcomp.sh doctor
+
+# Fresh-shell smoke test for the unified pipeline environment.
+bash rlcomp.sh env
+
+# Generate new-ops parquet files before stage1/stage2/infer.
+bash rlcomp.sh prepare
+```
+
+`fetch-assets` uses the public Hugging Face RL Compositionality collection by
+default. It downloads:
+
+| local path | default Hub repo |
+|---|---|
+| `model_store/hf_models/string-task/stage1-rft-hf/` | `weizechen/RL-Compositionality-Stage-1-Model` |
+| `data/string_task/stage1_level1/rft_data/` | `weizechen/RL-Compositionality-Stage1-RFT-Data` |
+| `data/string_task/stage2_level1/` | `weizechen/RL-Compositionality-Stage2-RL-Level1-TrainData` |
+| `data/string_task/stage2_level2/` | `weizechen/RL-Compositionality-Stage2-RL-Level2-TrainData` |
+| `data/string_task/stage2_level1to8/` | `weizechen/RL-Compositionality-Stage2-RL-Level8-TestData` |
+
+The Hub train repos publish `forward_train.parquet`, while the unified pipeline
+uses `train.parquet`; the fetch helper creates both names locally. The Level
+1-to-8 evaluation repo publishes `forward_test.parquet`; the helper also keeps
+`test.parquet` for older scripts.
+
+The PR itself does not require these artifacts to be committed or already
+present. If a networked cache-builder cannot reach Hugging Face during review,
+leave the artifacts absent and rely on `bash rlcomp.sh fetch-assets --check`,
+`bash rlcomp.sh package-offline --check`, and `bash rlcomp.sh doctor` to report
+the missing paths clearly. A complete transfer bundle is only required when
+moving the project to an offline machine.
+
+Special requirements and assumptions:
+
+- `bootstrap-cache` is the only step that needs `uv`; install it on the
+  networked cache builder with `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+- `fetch-assets` uses the modern `hf` CLI. Set `HF_TOKEN` in `.env.local` if
+  any Hub asset becomes private or gated.
+- The wheel cache targets CUDA 12.4 PyTorch wheels. Offline training still
+  needs a compatible NVIDIA driver and discoverable `libcuda.so.1`; the CUDA
+  toolkit itself is not required by the scripts.
+- `install` uses `--symlinks` when creating `.venv-rlcomp/` because
+  python-build-standalone resolves its standard library relative to the real
+  Python binary under `.python/`.
+- Generated cache directories are not PR artifacts. Do not `git add` `.python/`,
+  `wheels/`, `.venv-rlcomp/`, `model_store/`, or `data/`.
+
+Use `bash rlcomp.sh freeze` only when intentionally refreshing the lockfile and
+wheel cache from a known-good `.venv-rlcomp/`.
 
 ---
 
@@ -85,6 +181,11 @@ Available actions:
 | `stage2` | Run Stage 2 GRPO from the latest Stage 1 checkpoint. |
 | `infer` | Run the inference matrix and write evaluation records. |
 | `all` | Run `prepare -> stage1 -> stage2 -> infer`. |
+| `install` | Rebuild `.venv-rlcomp/` from the repo-local offline cache. |
+| `doctor` | Diagnose Python, wheels, imports, CUDA, assets, and paths. |
+| `bootstrap-cache` | Populate `.python/` and `wheels/` on a networked cache builder. |
+| `fetch-assets` | Download model/data assets into gitignored local paths. |
+| `package-offline` | Check, manifest, or tar the offline bundle. |
 | `logs` | Browse persisted pipeline logs. |
 
 Every `bash rlcomp.sh <action>` invocation writes a run directory under
@@ -125,10 +226,6 @@ WANDB_API_KEY=...
 WANDB_MODE=offline
 GPU_MEM_UTIL=0.70
 ```
-
-The complete offline environment cache/rebuild flow is intentionally separated
-from this logging entrypoint and should be documented with the environment
-assets that populate `.venv-rlcomp/`.
 
 ---
 
@@ -199,7 +296,7 @@ hf download --repo-type dataset --local-dir data/string_task/stage2_level1 weize
 hf download --repo-type dataset --local-dir data/string_task/stage2_level2 weizechen/RL-Compositionality-Stage2-RL-Level2-TrainData
 
 # Evaluation
-hf download --repo-type dataset --local-dir data/string_task/stage2_level1to8 weizechen/RL-Compositionality-Stage2-RL-Level2-TestData
+hf download --repo-type dataset --local-dir data/string_task/stage2_level1to8 weizechen/RL-Compositionality-Stage2-RL-Level8-TestData
 ```
 
 <details>
